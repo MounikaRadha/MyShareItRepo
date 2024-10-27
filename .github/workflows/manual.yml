@@ -1,0 +1,101 @@
+name: MyShareIt Image - Manual
+run-name: "MyShareIt Image - Deploy to ${{ github.event.inputs.Environment }} - ${{ github.event.inputs.Region }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      Environment:
+        description: 'Environment'
+        required: true
+        type: choice
+        options:
+          - staging
+      Region:
+        description: 'Region'
+        required: true
+        type: choice
+        default: US
+        options:
+          - US
+          - EU
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Java version
+        uses: actions/setup-java@v3
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+
+      - name: Set environment variables
+        run: |
+          echo "Environment value : ${{ github.event.inputs.environment }} "
+          echo "AWS_DEFAULT_OUTPUT=json" >> $GITHUB_ENV
+            echo "AWS_DEFAULT_REGION=redacted" >> $GITHUB_ENV
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.STAGING_AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.STAGING_AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+            echo "ECR_URL=redacted.amazonaws.com" >> $GITHUB_ENV
+            echo "REPO_NAME=redacted" >> $GITHUB_ENV
+            echo "SERVER_HOST=readacted" >> $GITHUB_ENV
+    
+
+      - name: Start SSH agent with passphrase
+        env:
+          SSH_PASSPHRASE: ${{ secrets.SSH_PASSPHRASE }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh                          # Create the .ssh directory
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa  # Write the private key to id_rsa
+          chmod 600 ~/.ssh/id_rsa                  # Set permissions for security
+          eval "$(ssh-agent -s)"                   # Start the SSH agent
+          echo "$SSH_PASSPHRASE" | ssh-add ~/.ssh/id_rsa  # Add the key with passphrase
+
+
+      - name: Gradle cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-   
+
+      - name: source code build
+        run: |
+          /bin/bash scripts/workflow-build.sh ${{ env.SERVER_HOST }}
+          unzip MyShareIt.zip
+
+      - name: Prepare Required Setup Files
+        run: |
+          cp -rf ${{ github.workspace }}/Dockerfile MyShareIt/
+          cp -rf ${{ github.workspace }}/docker/ MyShareIt/
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{env.AWS_DEFAULT_REGION}}
+
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push docker image to Amazon ECR
+        run: |
+          GIT_HASH=`git rev-parse --short HEAD`
+          echo $GIT_HASH
+          cd MyShareIt
+          docker build -t ${{ env.REPO_NAME }} . 
+          docker tag ${{ env.REPO_NAME }}:latest ${{ env.ECR_URL }}/${{ env.REPO_NAME }}:latest
+          docker tag ${{ env.REPO_NAME }}:latest ${{ env.ECR_URL }}/${{ env.REPO_NAME }}:tag-$GIT_HASH
+          docker push ${{ env.ECR_URL }}/${{ env.REPO_NAME }}:latest
+          docker push ${{ env.ECR_URL }}/${{ env.REPO_NAME }}:tag-$GIT_HASH
+
+     
